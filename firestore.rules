@@ -1,0 +1,19 @@
+rules_version = '2';
+
+// 共有コード（16桁）を知っている人だけが、そのリストを読み書きできる。
+// コードの一覧を取ることはできないので、他人のリストを探し当てることはできない。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /households/{code} {
+      allow get: if request.auth != null;
+      allow create: if request.auth != null && code.size() == 16;
+      allow list, update, delete: if false;
+
+      match /{coll}/{docId} {
+        allow read, write: if request.auth != null
+          && coll in ['stores', 'items']
+          && exists(/databases/$(database)/documents/households/$(code));
+      }
+    }
+  }
+}
