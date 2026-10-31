@@ -1,6 +1,6 @@
 import { firebaseConfig } from './firebase-config.js';
 import {
-  createLocalStore, connectFirebase, localSnapshot,
+  createLocalStore, createDeferredStore, connectFirebase, localSnapshot,
   newHouseholdCode, formatCode, parseCode,
 } from './data.js';
 
@@ -8,6 +8,7 @@ const APP_NAME = 'タスクネスト';
 const HID_KEY = 'kaimono.household';
 const DONE_OPEN_KEY = 'kaimono.doneOpen';
 const AUTO_KEY = 'kaimono.autobackup';
+const VIEW_CACHE_KEY = 'kaimono.viewcache';
 const TRASH_DAYS = 30;
 const AUTO_DAYS = 7;
 const DAY = 86400000;
@@ -87,10 +88,16 @@ async function boot() {
   const joinFromLink = parseCode(location.hash);
   if (joinFromLink) history.replaceState(null, '', location.pathname);
 
+  // 前回の表示内容があれば、サーバーにつながるのを待たずに先に出す
+  const cached = !joinFromLink && S.hid ? readViewCache(S.hid) : null;
+  const early = cached && createDeferredStore(cached);
+  if (early) useStore(early);
+
   try {
     S.fb = await connectFirebase(firebaseConfig);
   } catch (err) {
     console.error(err);
+    if (early) return toast('サーバーにつながっていません。電波のよい場所で開き直してください');
     app.innerHTML = `<div class="welcome"><h1>${APP_NAME}</h1>
       <p>共有サーバーにつながりませんでした。<br>電波のよい場所でもう一度開いてください。</p>
       <button class="primary" onclick="location.reload()">もう一度</button></div>`;
@@ -99,7 +106,25 @@ async function boot() {
 
   if (joinFromLink && joinFromLink !== S.hid) return renderWelcome(joinFromLink);
   if (!S.hid) return renderWelcome();
-  openHousehold(S.hid);
+  if (!early) return openHousehold(S.hid);
+  const real = S.fb.open(S.hid);
+  early.attach(real);
+  useStore(real); // 本物のデータがそろうまでは、いまの画面をそのまま見せておく
+}
+
+function readViewCache(hid) {
+  try {
+    const c = JSON.parse(lsGet(VIEW_CACHE_KEY, 'null'));
+    return c?.hid === hid ? c : null;
+  } catch { return null; }
+}
+
+let viewCacheTimer;
+function saveViewCache() {
+  if (S.store?.mode !== 'shared' || !S.hid) return;
+  clearTimeout(viewCacheTimer);
+  viewCacheTimer = setTimeout(() => lsSet(VIEW_CACHE_KEY,
+    JSON.stringify({ hid: S.hid, lists: S.lists, stores: S.stores, items: S.items })), 600);
 }
 
 function useStore(store) {
@@ -217,6 +242,7 @@ function render() {
 function refresh() {
   if (!isReady()) return;
   scheduleAutoBackup();
+  saveViewCache();
   if (S.gesture) { S.pending = true; return; }
   migrate();
   const r = route();
@@ -239,11 +265,20 @@ function setView(view, id = '') {
 
 // ---- 共通の行 ---------------------------------------------------------------
 
+// 左へスワイプしたときに出るボタン
+function rowActs(move) {
+  return `
+    <div class="acts">
+      <button class="act act-rename" data-act="rename">${icon('pen')}名前</button>
+      ${move ? `<button class="act act-move" data-act="move">${icon('move')}移動</button>` : ''}
+      <button class="act act-del" data-act="delete">${icon('trash')}削除</button>
+    </div>`;
+}
+
 function cardRow({ id, name, sub, count, move }) {
   return `
     <li class="row card" data-id="${id}">
-      ${move ? `<button class="act act-move" data-act="move">${icon('move')}移動</button>` : ''}
-      <button class="act act-del" data-act="delete">${icon('trash')}削除</button>
+      ${rowActs(move)}
       <div class="row-content">
         <div class="card-main">
           <span class="card-name">${esc(name)}</span>
@@ -258,8 +293,7 @@ function cardRow({ id, name, sub, count, move }) {
 function itemRow(i) {
   return `
     <li class="row item${i.done ? ' is-done' : ''}" data-id="${i.id}">
-      <button class="act act-move" data-act="move">${icon('move')}移動</button>
-      <button class="act act-del" data-act="delete">${icon('trash')}削除</button>
+      ${rowActs(true)}
       <div class="row-content">
         <span class="check" aria-hidden="true">${icon('check')}</span>
         <span class="item-name">${esc(i.name)}</span>
@@ -267,7 +301,7 @@ function itemRow(i) {
     </li>`;
 }
 
-const HINT = '左へスワイプで削除 ・ 右へスワイプで移動<br>長押しで名前の変更 ・ 長押ししたまま動かすと並び替え';
+const HINT = '左へスワイプで 名前の変更・移動・削除<br>長押しして持ち上げると並び替え';
 
 function header({ back, title, large, menu }) {
   return `
@@ -825,28 +859,44 @@ function restore(d) {
 }
 
 // ---- 行のジェスチャー -------------------------------------------------------
-// タップ／左へスワイプ＝削除ボタン／右へスワイプ＝移動ボタン／
-// 長押し＝名前の変更／長押ししたまま動かす＝並び替え
+// タップ／左へスワイプ＝名前・移動・削除のボタン／長押しして持ち上げる＝並び替え
 
-const ACT_W = 84;
+const ACT_W = 72;
+const LIFT_MS = 380;
 let openRow = null;
 
 function setRowOffset(row, x) {
   $('.row-content', row).style.transform = x ? `translateX(${x}px)` : '';
 }
 
+const actsWidth = row => row.querySelectorAll('.act').length * ACT_W;
+
 function closeRow(row) {
   if (!row) return;
   if (openRow === row) openRow = null;
   delete row.dataset.open;
   setRowOffset(row, 0);
-  setTimeout(() => { if (!row.dataset.open) row.classList.remove('revealed'); }, 220);
+  setTimeout(() => { if (!row.dataset.open) row.classList.remove('revealed'); }, 240);
 }
 
 function closeOpenRowOnOutside(e) {
   if (!openRow || e.target.closest('[data-act]')) return;
   closeRow(openRow);
   e.kmClosed = true; // このタップでは行の操作をしない
+}
+
+// iPhone の Safari には振動の API がないため、スイッチ部品を切り替えたときの振動を借りる（効かない環境もある）
+const hapticSwitch = (() => {
+  const label = document.createElement('label');
+  label.setAttribute('aria-hidden', 'true');
+  label.style.cssText = 'position:fixed;left:-99px;top:0;opacity:0;pointer-events:none';
+  label.innerHTML = '<input type="checkbox" switch tabindex="-1">';
+  document.body.append(label);
+  return label;
+})();
+function haptic() {
+  if (navigator.vibrate) navigator.vibrate(10);
+  else hapticSwitch.click();
 }
 
 function gestures(list, o) {
@@ -857,8 +907,7 @@ function gestures(list, o) {
     if (!b) return;
     const row = b.closest('.row');
     closeRow(row);
-    if (b.dataset.act === 'delete') o.onDelete(row);
-    else o.onMove?.(row);
+    ({ rename: o.onRename, move: o.onMove, delete: o.onDelete })[b.dataset.act]?.(row);
   });
 
   list.addEventListener('pointerdown', e => {
@@ -868,39 +917,41 @@ function gestures(list, o) {
     try { list.setPointerCapture(e.pointerId); } catch {}
     st = { row, x0: e.clientX, y0: e.clientY, sy0: scrollY, mode: 'pending', dx: 0 };
     row.classList.add('pressing');
+    if (!o.onReorder) return;
     st.timer = setTimeout(() => {
       if (st?.mode !== 'pending') return;
       st.mode = 'lifted';
       S.gesture = true;
       row.classList.remove('pressing');
       row.classList.add('lifted');
-      navigator.vibrate?.(8);
-    }, 450);
+      list.classList.add('sorting');
+      haptic();
+    }, LIFT_MS);
   });
 
   list.addEventListener('pointermove', e => {
     if (!st) return;
     const dx = e.clientX - st.x0, dy = e.clientY - st.y0;
     if (st.mode === 'pending') {
-      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < -10 && Math.abs(dx) > Math.abs(dy)) {
         clearTimeout(st.timer);
         st.mode = 'swipe';
         S.gesture = true;
+        st.width = actsWidth(st.row);
         st.row.classList.remove('pressing');
         st.row.classList.add('revealed', 'swiping');
-      } else if (Math.abs(dy) > 10) {
+      } else if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
         return reset();
       }
     }
     if (st.mode === 'swipe') {
-      const max = ACT_W * 1.3;
-      st.dx = Math.max(-max, Math.min(o.onMove ? max : 0, dx));
+      st.dx = Math.max(-(st.width + 24), Math.min(0, dx));
       setRowOffset(st.row, st.dx);
-    } else if (st.mode === 'lifted' && o.onReorder && Math.hypot(dx, dy) > 6) {
+    } else if (st.mode === 'lifted' && Math.hypot(dx, dy) > 4) {
       startDrag(e.clientY);
     } else if (st.mode === 'drag') {
       st.lastY = e.clientY;
-      moveDrag();
+      requestMove();
     }
   });
 
@@ -912,14 +963,14 @@ function gestures(list, o) {
     if (mode === 'pending') {
       o.onTap(row);
     } else if (mode === 'swipe') {
-      if (st.dx < -ACT_W / 2) { row.dataset.open = 'right'; setRowOffset(row, -ACT_W); openRow = row; }
-      else if (st.dx > ACT_W / 2) { row.dataset.open = 'left'; setRowOffset(row, ACT_W); openRow = row; }
+      if (st.dx < -st.width / 3) { row.dataset.open = '1'; setRowOffset(row, -st.width); openRow = row; }
       else closeRow(row);
     } else if (mode === 'lifted') {
+      // 持ち上げただけで動かさなかった
       row.classList.remove('lifted');
-      o.onRename(row);
+      list.classList.remove('sorting');
     } else if (mode === 'drag') {
-      endDrag();
+      return endDrag();
     }
     st = null;
     flush();
@@ -927,7 +978,7 @@ function gestures(list, o) {
 
   list.addEventListener('pointercancel', reset);
 
-  // 長押し中・スワイプ中・並び替え中は画面をスクロールさせない
+  // 持ち上げ中・スワイプ中・並び替え中は画面をスクロールさせない
   list.addEventListener('touchmove', e => {
     if (st && st.mode !== 'pending') e.preventDefault();
   }, { passive: false });
@@ -936,9 +987,10 @@ function gestures(list, o) {
   function reset() {
     if (!st) return;
     clearTimeout(st.timer);
+    if (st.mode === 'drag') { st.target = st.idx; return endDrag(); }
     st.row.classList.remove('pressing', 'swiping', 'lifted');
+    list.classList.remove('sorting');
     if (st.mode === 'swipe') closeRow(st.row);
-    if (st.mode === 'drag') { st.target = st.idx; endDrag(); }
     st = null;
     flush();
   }
@@ -959,36 +1011,58 @@ function gestures(list, o) {
     const tick = () => {
       if (!st || st.mode !== 'drag') return;
       const edge = 90;
-      if (st.lastY < edge) { scrollBy(0, -8); moveDrag(); }
-      else if (st.lastY > innerHeight - edge) { scrollBy(0, 8); moveDrag(); }
+      if (st.lastY < edge) { scrollBy(0, -10); moveDrag(); }
+      else if (st.lastY > innerHeight - edge) { scrollBy(0, 10); moveDrag(); }
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
     moveDrag();
   }
 
+  // 指の動きは1フレームにまとめて反映する
+  let raf = 0;
+  function requestMove() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; if (st?.mode === 'drag') moveDrag(); });
+  }
+
   function moveDrag() {
     const dy = st.lastY + scrollY - (st.y0 + st.sy0);
-    st.row.style.transform = `translateY(${dy}px)`;
+    st.row.style.transform = `translate3d(0, ${dy}px, 0) scale(1.03)`;
     const c = st.centers[st.idx] + dy;
+    // 隣の行の真ん中より少し手前で入れ替える（指に遅れて見えないように）
+    const lead = st.step * 0.15;
     let target = st.idx;
     st.rows.forEach((r, n) => {
       if (r === st.row) return;
       let shift = 0;
-      if (n < st.idx && c < st.centers[n]) { shift = st.step; target--; }
-      else if (n > st.idx && c > st.centers[n]) { shift = -st.step; target++; }
-      r.style.transform = shift ? `translateY(${shift}px)` : '';
+      if (n < st.idx && c < st.centers[n] + lead) { shift = st.step; target--; }
+      else if (n > st.idx && c > st.centers[n] - lead) { shift = -st.step; target++; }
+      r.style.transform = shift ? `translate3d(0, ${shift}px, 0)` : '';
     });
+    if (target !== st.target) haptic();
     st.target = target;
   }
 
+  // 指を離したら、収まる位置まで滑らかに動かしてから並びを確定する
   function endDrag() {
-    const { rows, row, idx, target } = st;
-    rows.forEach(r => { r.style.transform = ''; r.classList.remove('shifting', 'dragging', 'lifted'); });
-    if (target === idx) return;
-    const rest = rows.filter(r => r !== row);
-    list.insertBefore(row, rest[target] ?? null);
-    o.onReorder(row.dataset.id, rest[target - 1]?.dataset.id, rest[target]?.dataset.id);
+    const { rows, row, idx, target, step } = st;
+    st = null;
+    row.classList.add('dropping');
+    row.style.transform = `translate3d(0, ${(target - idx) * step}px, 0)`;
+    setTimeout(() => {
+      rows.forEach(r => {
+        r.classList.remove('shifting', 'dragging', 'lifted', 'dropping');
+        r.style.transform = '';
+      });
+      list.classList.remove('sorting');
+      if (target !== idx) {
+        const rest = rows.filter(r => r !== row);
+        list.insertBefore(row, rest[target] ?? null);
+        o.onReorder(row.dataset.id, rest[target - 1]?.dataset.id, rest[target]?.dataset.id);
+      }
+      flush();
+    }, 170);
   }
 }
 
@@ -1061,6 +1135,7 @@ function icon(name) {
     more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
     check: '<path d="M6 12.5l4 4 8-9"/>',
     undo: '<path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 010 10h-2"/>',
+    pen: '<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M14 6l4 4"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     move: '<path d="M5 12h14M15 8l4 4-4 4"/><path d="M5 5v14"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',

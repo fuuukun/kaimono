@@ -85,6 +85,56 @@ export function createLocalStore() {
   };
 }
 
+// ---- 起動直後のつなぎ -------------------------------------------------------
+// サーバーにつながるまでのあいだ、前回の表示内容で先に画面を出す。
+// その間の操作は手元に反映しつつ貯めておき、つながったら本物へ送る。
+export function createDeferredStore(seed) {
+  const data = {};
+  ['lists', 'stores', 'items'].forEach(coll =>
+    (data[coll] = new Map((seed[coll] ?? []).map(x => [x.id, x]))));
+  const listeners = { lists: new Set(), stores: new Set(), items: new Set() };
+  const queue = [];
+  let target = null;
+  const emit = coll => listeners[coll].forEach(fn => fn([...data[coll].values()]));
+  const pass = (op, ...args) => {
+    if (target) return target[op](...args);
+    queue.push([op, args]);
+    return null;
+  };
+
+  return {
+    mode: 'shared',
+    subscribe(coll, fn) {
+      listeners[coll].add(fn);
+      fn([...data[coll].values()]);
+      return () => listeners[coll].delete(fn);
+    },
+    add(coll, obj) {
+      const doc = { ...obj, id: obj.id || newId() };
+      data[coll].set(doc.id, doc);
+      pass('add', coll, doc);
+      emit(coll);
+      return doc.id;
+    },
+    update(coll, id, patch) {
+      const cur = data[coll].get(id);
+      if (cur) data[coll].set(id, { ...cur, ...patch });
+      pass('update', coll, id, patch);
+      emit(coll);
+    },
+    remove(coll, ids) {
+      [].concat(ids).forEach(id => data[coll].delete(id));
+      pass('remove', coll, ids);
+      emit(coll);
+    },
+    // 本物の置き場所がそろったら、貯めた操作を順に送る
+    attach(real) {
+      target = real;
+      queue.splice(0).forEach(([op, args]) => real[op](...args));
+    },
+  };
+}
+
 // ---- 夫婦で共有（Firebase） -------------------------------------------------
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1';
 
@@ -96,14 +146,14 @@ export async function connectFirebase(config) {
   ]);
 
   const app = initializeApp(config);
+  // 電波の弱いお店の中でも使えるよう、端末にもデータを持たせる。
+  // ホーム画面のアプリは同時に1つしか開かないので、複数タブの調整は省いて起動を軽くする
+  const db = fs.initializeFirestore(app, {
+    localCache: fs.persistentLocalCache({ tabManager: fs.persistentSingleTabManager({ forceOwnership: true }) }),
+  });
   const a = auth.getAuth(app);
   await a.authStateReady();
   if (!a.currentUser) await auth.signInAnonymously(a);
-
-  // 電波の弱いお店の中でも使えるよう、端末にもデータを持たせる
-  const db = fs.initializeFirestore(app, {
-    localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }),
-  });
 
   return {
     async householdExists(code) {
