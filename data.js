@@ -34,9 +34,9 @@ const LOCAL_KEY = 'kaimono.local.v1';
 function readLocal() {
   try {
     const v = JSON.parse(localStorage.getItem(LOCAL_KEY));
-    if (v && v.stores && v.items) return v;
+    if (v && v.stores && v.items) return { lists: {}, ...v };
   } catch {}
-  return { stores: {}, items: {} };
+  return { lists: {}, stores: {}, items: {} };
 }
 
 export function localSnapshot() {
@@ -45,7 +45,7 @@ export function localSnapshot() {
 
 export function createLocalStore() {
   let data = readLocal();
-  const listeners = { stores: new Set(), items: new Set() };
+  const listeners = { lists: new Set(), stores: new Set(), items: new Set() };
 
   const emit = coll => listeners[coll].forEach(fn => fn(Object.values(data[coll])));
   const save = coll => {
@@ -57,8 +57,7 @@ export function createLocalStore() {
   window.addEventListener('storage', e => {
     if (e.key !== LOCAL_KEY) return;
     data = readLocal();
-    emit('stores');
-    emit('items');
+    Object.keys(listeners).forEach(emit);
   });
 
   return {
@@ -114,10 +113,8 @@ export async function connectFirebase(config) {
     async createHousehold(code, seed) {
       await fs.setDoc(fs.doc(db, 'households', code), { createdAt: Date.now() });
       if (!seed) return;
-      const rows = [
-        ...Object.values(seed.stores).map(v => ['stores', v]),
-        ...Object.values(seed.items).map(v => ['items', v]),
-      ];
+      const rows = ['lists', 'stores', 'items']
+        .flatMap(coll => Object.values(seed[coll] || {}).map(v => [coll, v]));
       for (let i = 0; i < rows.length; i += 400) {
         const batch = fs.writeBatch(db);
         rows.slice(i, i + 400).forEach(([coll, v]) =>

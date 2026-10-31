@@ -1,6 +1,6 @@
 // 電波がなくてもアプリを開けるよう、画面のファイルを端末に置いておく。
 // ファイルを更新したら VERSION を上げる（次に開いたとき新しいほうに入れ替わる）。
-const VERSION = 'kaimono-v1';
+const VERSION = 'kaimono-v3';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'data.js', 'firebase-config.js',
   'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',

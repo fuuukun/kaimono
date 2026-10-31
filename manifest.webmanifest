@@ -1,7 +1,7 @@
 {
-  "name": "かいもの",
-  "short_name": "かいもの",
-  "description": "お店ごとに買うものをふたりで共有する買い物リスト",
+  "name": "タスクネスト",
+  "short_name": "タスクネスト",
+  "description": "買い物ややることを、ふたりで共有するシンプルなタスク管理",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",
