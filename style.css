@@ -86,21 +86,22 @@ input::placeholder { color: var(--muted); }
 
 main { padding: 0 16px; }
 
-/* ---- 行（3階層で共通）：左へスワイプすると下の 名前・移動・削除 ボタンが見える ---- */
+/* ---- 行（3階層で共通）：左へスワイプで 名前・削除、右へスワイプで 移動 ---- */
 .cards { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 10px; }
+/* isolation は、iPhone で動いている中身が角丸の外へはみ出さないようにするため */
 .row {
-  position: relative; touch-action: pan-y;
+  position: relative; overflow: hidden; isolation: isolate; touch-action: pan-y;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  transition: opacity .18s ease;
 }
-.row-content {
-  position: relative; z-index: 1; background: var(--surface);
-  transition: transform .24s cubic-bezier(.2, .8, .2, 1), background .15s ease;
-}
-.row.swiping .row-content { transition: background .15s ease; }
-.acts { position: absolute; top: 0; right: 0; bottom: 0; z-index: 0; display: none; }
-.row.revealed .acts { display: flex; }
+.row-content { position: relative; z-index: 1; background: var(--surface); transition: background .15s ease; }
+/* ボタンは行がずれて空いた幅にだけ出る（幅は app.js が指に合わせて変える） */
+.acts { position: absolute; top: 0; bottom: 0; width: 0; display: flex; overflow: hidden; }
+.acts-start { left: 0; }
+.acts-end { right: 0; }
 .act {
-  width: 72px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
   color: #fff; font-size: 12px; font-weight: 600;
 }
 .act .i { width: 20px; height: 20px; }
@@ -110,9 +111,9 @@ main { padding: 0 16px; }
 .act-del { background: var(--danger); }
 
 /* 押している間：少しずつ暗くなる（すぐ離せばほとんど変わらない） */
-.row.pressing .row-content { background: var(--press); transition: transform .24s, background .32s ease .06s; }
+.row.pressing .row-content { background: var(--press); transition: background .32s ease .06s; }
 
-.card { border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+.card { border-radius: var(--radius); box-shadow: var(--shadow); }
 .card .row-content { display: flex; align-items: center; gap: 12px; padding: 16px 14px 16px 18px; cursor: pointer; }
 .card-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .card-name { font-weight: 600; font-size: 18px; overflow-wrap: anywhere; }
@@ -126,7 +127,6 @@ main { padding: 0 16px; }
 .chev .i { width: 18px; height: 18px; }
 
 /* 長押しで持ち上がる・並び替え：持ち上げた行が浮き、ほかの行は薄くなる */
-.row { transition: opacity .18s ease; }
 .row.lifted {
   z-index: 10; transform: scale(1.03);
   box-shadow: 0 12px 30px rgba(40, 30, 10, .22), 0 0 0 2px var(--accent);
@@ -179,9 +179,8 @@ main { padding: 0 16px; }
 /* ---- タスク ---- */
 .items { list-style: none; margin: 0; padding: 0; border-radius: var(--radius); box-shadow: var(--shadow); }
 .items:empty { display: none; }
-.item { overflow: hidden; }
-.item:first-child, .item:first-child .row-content { border-top-left-radius: var(--radius); border-top-right-radius: var(--radius); }
-.item:last-child, .item:last-child .row-content { border-bottom-left-radius: var(--radius); border-bottom-right-radius: var(--radius); }
+.item:first-child { border-top-left-radius: var(--radius); border-top-right-radius: var(--radius); }
+.item:last-child { border-bottom-left-radius: var(--radius); border-bottom-right-radius: var(--radius); }
 .item .row-content { display: flex; align-items: center; gap: 14px; min-height: 54px; padding: 12px 16px; cursor: pointer; }
 .item + .item .row-content { box-shadow: inset 0 1px 0 var(--line); }
 .check {

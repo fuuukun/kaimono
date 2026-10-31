@@ -265,12 +265,12 @@ function setView(view, id = '') {
 
 // ---- 共通の行 ---------------------------------------------------------------
 
-// 左へスワイプしたときに出るボタン
+// スワイプで出るボタン。右へスワイプ＝左側に 移動、左へスワイプ＝右側に 名前・削除
 function rowActs(move) {
   return `
-    <div class="acts">
+    <div class="acts acts-start">${move ? `<button class="act act-move" data-act="move">${icon('move')}移動</button>` : ''}</div>
+    <div class="acts acts-end">
       <button class="act act-rename" data-act="rename">${icon('pen')}名前</button>
-      ${move ? `<button class="act act-move" data-act="move">${icon('move')}移動</button>` : ''}
       <button class="act act-del" data-act="delete">${icon('trash')}削除</button>
     </div>`;
 }
@@ -301,11 +301,11 @@ function itemRow(i) {
     </li>`;
 }
 
-const HINT = '左へスワイプで 名前の変更・移動・削除<br>長押しして持ち上げると並び替え';
+const hint = move => `左へスワイプで 名前の変更・削除${move ? '、右へスワイプで 移動' : ''}<br>長押しして持ち上げると並び替え`;
 
 function header({ back, title, large, menu }) {
   return `
-    <header class="bar${large ? ' bar-lg' : ''}">
+    <header class="bar">
       ${back ? `<button class="back" id="back">${icon('back')}<span>${esc(back)}</span></button>` : ''}
       <h1 class="${large ? 'title-lg' : 'title'}" id="title">${esc(title)}</h1>
       <button class="icon-btn" id="menu" aria-label="${menu}">${icon(large ? 'gear' : 'more')}</button>
@@ -326,7 +326,7 @@ function renderHome() {
         <div class="chips">${Object.entries(TEMPLATES).map(([k, t]) =>
           `<button class="chip" data-tpl="${k}">${icon('plus')}${esc(t.name)}</button>`).join('')}</div>
       </div>
-      <p class="hint" id="hint">${HINT}</p>
+      <p class="hint" id="hint">${hint(false)}</p>
     </main>
     <footer class="dock">
       <button class="primary wide" id="add">${icon('plus')}リストを追加</button>
@@ -402,7 +402,7 @@ function renderList(id) {
         <div class="chips">${t.starters.map(n =>
           `<button class="chip" data-starter="${esc(n)}">${icon('plus')}${esc(n)}</button>`).join('')}</div>
       </div>
-      <p class="hint" id="hint">${HINT}</p>
+      <p class="hint" id="hint">${hint(true)}</p>
     </main>
     <footer class="dock">
       <button class="primary wide" id="add">${icon('plus')}${esc(t.child)}を追加</button>
@@ -486,7 +486,7 @@ function renderGroup(id) {
         <button class="done-head" id="done-toggle"><span id="done-label"></span><span class="chev-s">${icon('chev')}</span></button>
         <ul class="items done" id="done"></ul>
       </section>
-      <p class="hint">${HINT}</p>
+      <p class="hint">${hint(true)}</p>
     </main>`;
 
   $('#back').onclick = () => { location.hash = `#/l/${groupById(id)?.listId ?? ''}`; };
@@ -859,60 +859,45 @@ function restore(d) {
 }
 
 // ---- 行のジェスチャー -------------------------------------------------------
-// タップ／左へスワイプ＝名前・移動・削除のボタン／長押しして持ち上げる＝並び替え
+// タップ／左へスワイプ＝名前・削除／右へスワイプ＝移動／長押しして持ち上げる＝並び替え
 
 const ACT_W = 72;
 const LIFT_MS = 380;
+const EASE = 'cubic-bezier(.25, 1, .5, 1)';
 let openRow = null;
 
-// 行を横に動かす。dur を付けると、そこまで減速しながら滑らかに動く
-const EASE = 'cubic-bezier(.25, 1, .5, 1)';
+// 行を横にずらし、空いた幅にだけボタンを出す（ボタンを行の下に敷かないので、どこからも透けない）。
+// dur を付けると、そこまで減速しながら滑らかに動く
 function setRowOffset(row, x, dur = 0) {
   const c = $('.row-content', row);
-  clearTimeout(c._t);
-  c.style.transition = dur ? `transform ${dur}ms ${EASE}, background .15s ease` : '';
+  const start = $('.acts-start', row);
+  const end = $('.acts-end', row);
+  const t = dur ? `${dur}ms ${EASE}` : '';
+  clearTimeout(row._t);
+  c.style.transition = t && `transform ${t}, background .15s ease`;
+  start.style.transition = end.style.transition = t && `width ${t}`;
   c.style.transform = x ? `translate3d(${x}px, 0, 0)` : '';
-  if (dur) c._t = setTimeout(() => { c.style.transition = ''; }, dur + 20);
+  start.style.width = `${Math.max(0, x)}px`;
+  end.style.width = `${Math.max(0, -x)}px`;
+  if (dur) row._t = setTimeout(() => { c.style.transition = start.style.transition = end.style.transition = ''; }, dur + 20);
 }
 
-const actsWidth = row => row.querySelectorAll('.act').length * ACT_W;
-
-function openRowTo(row, width, dur = 320) {
-  if (openRow && openRow !== row) closeRow(openRow);
-  row.dataset.open = '1';
-  row.classList.add('revealed');
-  openRow = row;
-  setRowOffset(row, -width, dur);
+// 開いた位置（右へ開く・閉じる・左へ開く）に収める。開いておけるのは1行だけ
+function settleRow(row, x, dur = 320) {
+  if (x && openRow && openRow !== row) settleRow(openRow, 0);
+  if (x) openRow = row;
+  else if (openRow === row) openRow = null;
+  row.dataset.x = x;
+  setRowOffset(row, x, dur);
 }
-
-function closeRow(row, dur = 320) {
-  if (!row) return;
-  if (openRow === row) openRow = null;
-  delete row.dataset.open;
-  setRowOffset(row, 0, dur);
-  setTimeout(() => { if (!row.dataset.open && !row.classList.contains('swiping')) row.classList.remove('revealed'); }, dur);
-}
+const closeRow = (row, dur) => settleRow(row, 0, dur);
+const sideW = acts => acts.children.length * ACT_W;
 
 // ほかの場所に触れたら、開いている行を閉じる（開いている行そのものは指で押し戻せる）
 function closeOpenRowOnOutside(e) {
   if (!openRow || e.target.closest('[data-act]') || openRow.contains(e.target)) return;
   closeRow(openRow);
   e.kmClosed = true; // このタップでは行の操作をしない
-}
-
-// iPhone の Safari には振動の API がないため、スイッチ部品を切り替えたときの振動を借りる。
-// 指を離した瞬間など、操作の直後にしか効かない（長押しの途中では振動させられない）
-const hapticSwitch = (() => {
-  const label = document.createElement('label');
-  label.setAttribute('aria-hidden', 'true');
-  label.style.cssText = 'position:fixed;left:-99px;top:0;opacity:0;pointer-events:none';
-  label.innerHTML = '<input type="checkbox" switch tabindex="-1">';
-  document.body.append(label);
-  return label;
-})();
-function haptic(inGesture) {
-  if (navigator.vibrate) navigator.vibrate(10);
-  else if (inGesture) hapticSwitch.click();
 }
 
 function gestures(list, o) {
@@ -931,9 +916,12 @@ function gestures(list, o) {
     const row = e.target.closest('.row');
     if (!row) return;
     try { list.setPointerCapture(e.pointerId); } catch {}
-    const isOpen = !!row.dataset.open;
-    st = { row, x0: e.clientX, y0: e.clientY, sy0: scrollY, mode: 'pending', isOpen, base: isOpen ? -actsWidth(row) : 0 };
-    if (isOpen) return; // 開いている行は、押し戻すか、タップで閉じるだけ
+    const base = +row.dataset.x || 0;
+    st = {
+      row, x0: e.clientX, y0: e.clientY, sy0: scrollY, mode: 'pending', base,
+      startW: sideW($('.acts-start', row)), endW: sideW($('.acts-end', row)),
+    };
+    if (base) return; // 開いている行は、押し戻すか、タップで閉じるだけ
     row.classList.add('pressing');
     if (!o.onReorder) return;
     st.timer = setTimeout(() => {
@@ -943,7 +931,6 @@ function gestures(list, o) {
       row.classList.remove('pressing');
       row.classList.add('lifted');
       list.classList.add('sorting');
-      haptic(false);
     }, LIFT_MS);
   });
 
@@ -952,22 +939,21 @@ function gestures(list, o) {
     const dx = e.clientX - st.x0, dy = e.clientY - st.y0;
     if (st.mode === 'pending') {
       const horizontal = Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy) * 1.2;
-      if (horizontal && (dx < 0 || st.isOpen)) {
+      if (horizontal && (dx < 0 || st.startW || st.base)) {
         clearTimeout(st.timer);
-        Object.assign(st, { mode: 'swipe', width: actsWidth(st.row), xs: e.clientX, samples: [] });
+        Object.assign(st, { mode: 'swipe', xs: e.clientX, samples: [] });
         S.gesture = true;
         st.row.classList.remove('pressing');
-        st.row.classList.add('revealed', 'swiping');
       } else if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
         return reset();
       }
     }
     if (st.mode === 'swipe') {
-      // 動き出した位置から数えるので、指に吸い付いたまま動く
+      // 動き出した位置から数えるので、指に吸い付いたまま動く。ボタンの幅を超えたら重くなる
+      const { startW, endW } = st;
       let x = st.base + (e.clientX - st.xs);
-      const max = -st.width;
-      if (x < max) x = max + (x - max) * 0.35;  // ボタンの幅を超えたら重くなる
-      if (x > 0) x *= 0.25;
+      if (x < -endW) x = -endW + (x + endW) * 0.35;
+      if (x > startW) x = startW ? startW + (x - startW) * 0.35 : 0; // 右にボタンがない画面では動かさない
       st.x = x;
       st.samples.push([e.clientX, e.timeStamp]);
       if (st.samples.length > 5) st.samples.shift();
@@ -984,9 +970,9 @@ function gestures(list, o) {
     if (!st) return;
     const { row, mode } = st;
     clearTimeout(st.timer);
-    row.classList.remove('pressing', 'swiping');
+    row.classList.remove('pressing');
     if (mode === 'pending') {
-      if (st.isOpen) closeRow(row);
+      if (st.base) closeRow(row);
       else o.onTap(row);
     } else if (mode === 'swipe') {
       finishSwipe();
@@ -995,28 +981,26 @@ function gestures(list, o) {
       row.classList.remove('lifted');
       list.classList.remove('sorting');
     } else if (mode === 'drag') {
-      haptic(true);
+      moveDrag(); // 最後の指の位置を反映してから収める
       return endDrag();
     }
     st = null;
     flush();
   });
 
-  // 離したときの位置と指の速さで、開くか閉じるかを決める（はじけば少しの移動でも開閉する）
+  // 離したときの位置と指の速さで、どこに収めるかを決める（はじけば少しの移動でも開閉する）
   function finishSwipe() {
-    const { row, width, x = st.base, samples } = st;
-    const [a, b] = [samples[0], samples[samples.length - 1]];
+    const { row, x = st.base, samples, startW, endW } = st;
+    const a = samples[0], b = samples[samples.length - 1];
     const v = a && b && b[1] > a[1] ? (b[0] - a[0]) / (b[1] - a[1]) : 0; // px/ms、左がマイナス
-    const open = v < -0.35 ? true : v > 0.35 ? false : x < -width / 2;
+    let to;
+    if (v < -0.35) to = x > 0 ? 0 : -endW;
+    else if (v > 0.35) to = x < 0 ? 0 : startW;
+    else to = x < -endW / 2 ? -endW : startW && x > startW / 2 ? startW : 0;
     // 速くはじいたほど短い時間で収める
-    const dist = Math.abs((open ? -width : 0) - x);
+    const dist = Math.abs(to - x);
     const dur = Math.round(Math.max(180, Math.min(380, Math.abs(v) > 0.35 ? dist / Math.abs(v) * 1.6 : 340)));
-    if (open) {
-      if (!st.isOpen) haptic(true);
-      openRowTo(row, width, dur);
-    } else {
-      closeRow(row, dur);
-    }
+    settleRow(row, to, dur);
   }
 
   list.addEventListener('pointercancel', reset);
@@ -1031,7 +1015,7 @@ function gestures(list, o) {
     if (!st) return;
     clearTimeout(st.timer);
     if (st.mode === 'drag') { st.target = st.idx; return endDrag(); }
-    st.row.classList.remove('pressing', 'swiping', 'lifted');
+    st.row.classList.remove('pressing', 'lifted');
     list.classList.remove('sorting');
     if (st.mode === 'swipe') closeRow(st.row);
     st = null;
