@@ -865,27 +865,43 @@ const ACT_W = 72;
 const LIFT_MS = 380;
 let openRow = null;
 
-function setRowOffset(row, x) {
-  $('.row-content', row).style.transform = x ? `translateX(${x}px)` : '';
+// 行を横に動かす。dur を付けると、そこまで減速しながら滑らかに動く
+const EASE = 'cubic-bezier(.25, 1, .5, 1)';
+function setRowOffset(row, x, dur = 0) {
+  const c = $('.row-content', row);
+  clearTimeout(c._t);
+  c.style.transition = dur ? `transform ${dur}ms ${EASE}, background .15s ease` : '';
+  c.style.transform = x ? `translate3d(${x}px, 0, 0)` : '';
+  if (dur) c._t = setTimeout(() => { c.style.transition = ''; }, dur + 20);
 }
 
 const actsWidth = row => row.querySelectorAll('.act').length * ACT_W;
 
-function closeRow(row) {
+function openRowTo(row, width, dur = 320) {
+  if (openRow && openRow !== row) closeRow(openRow);
+  row.dataset.open = '1';
+  row.classList.add('revealed');
+  openRow = row;
+  setRowOffset(row, -width, dur);
+}
+
+function closeRow(row, dur = 320) {
   if (!row) return;
   if (openRow === row) openRow = null;
   delete row.dataset.open;
-  setRowOffset(row, 0);
-  setTimeout(() => { if (!row.dataset.open) row.classList.remove('revealed'); }, 240);
+  setRowOffset(row, 0, dur);
+  setTimeout(() => { if (!row.dataset.open && !row.classList.contains('swiping')) row.classList.remove('revealed'); }, dur);
 }
 
+// ほかの場所に触れたら、開いている行を閉じる（開いている行そのものは指で押し戻せる）
 function closeOpenRowOnOutside(e) {
-  if (!openRow || e.target.closest('[data-act]')) return;
+  if (!openRow || e.target.closest('[data-act]') || openRow.contains(e.target)) return;
   closeRow(openRow);
   e.kmClosed = true; // このタップでは行の操作をしない
 }
 
-// iPhone の Safari には振動の API がないため、スイッチ部品を切り替えたときの振動を借りる（効かない環境もある）
+// iPhone の Safari には振動の API がないため、スイッチ部品を切り替えたときの振動を借りる。
+// 指を離した瞬間など、操作の直後にしか効かない（長押しの途中では振動させられない）
 const hapticSwitch = (() => {
   const label = document.createElement('label');
   label.setAttribute('aria-hidden', 'true');
@@ -894,9 +910,9 @@ const hapticSwitch = (() => {
   document.body.append(label);
   return label;
 })();
-function haptic() {
+function haptic(inGesture) {
   if (navigator.vibrate) navigator.vibrate(10);
-  else hapticSwitch.click();
+  else if (inGesture) hapticSwitch.click();
 }
 
 function gestures(list, o) {
@@ -906,7 +922,7 @@ function gestures(list, o) {
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const row = b.closest('.row');
-    closeRow(row);
+    closeRow(row, 260);
     ({ rename: o.onRename, move: o.onMove, delete: o.onDelete })[b.dataset.act]?.(row);
   });
 
@@ -915,7 +931,9 @@ function gestures(list, o) {
     const row = e.target.closest('.row');
     if (!row) return;
     try { list.setPointerCapture(e.pointerId); } catch {}
-    st = { row, x0: e.clientX, y0: e.clientY, sy0: scrollY, mode: 'pending', dx: 0 };
+    const isOpen = !!row.dataset.open;
+    st = { row, x0: e.clientX, y0: e.clientY, sy0: scrollY, mode: 'pending', isOpen, base: isOpen ? -actsWidth(row) : 0 };
+    if (isOpen) return; // 開いている行は、押し戻すか、タップで閉じるだけ
     row.classList.add('pressing');
     if (!o.onReorder) return;
     st.timer = setTimeout(() => {
@@ -925,7 +943,7 @@ function gestures(list, o) {
       row.classList.remove('pressing');
       row.classList.add('lifted');
       list.classList.add('sorting');
-      haptic();
+      haptic(false);
     }, LIFT_MS);
   });
 
@@ -933,11 +951,11 @@ function gestures(list, o) {
     if (!st) return;
     const dx = e.clientX - st.x0, dy = e.clientY - st.y0;
     if (st.mode === 'pending') {
-      if (dx < -10 && Math.abs(dx) > Math.abs(dy)) {
+      const horizontal = Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy) * 1.2;
+      if (horizontal && (dx < 0 || st.isOpen)) {
         clearTimeout(st.timer);
-        st.mode = 'swipe';
+        Object.assign(st, { mode: 'swipe', width: actsWidth(st.row), xs: e.clientX, samples: [] });
         S.gesture = true;
-        st.width = actsWidth(st.row);
         st.row.classList.remove('pressing');
         st.row.classList.add('revealed', 'swiping');
       } else if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
@@ -945,8 +963,15 @@ function gestures(list, o) {
       }
     }
     if (st.mode === 'swipe') {
-      st.dx = Math.max(-(st.width + 24), Math.min(0, dx));
-      setRowOffset(st.row, st.dx);
+      // 動き出した位置から数えるので、指に吸い付いたまま動く
+      let x = st.base + (e.clientX - st.xs);
+      const max = -st.width;
+      if (x < max) x = max + (x - max) * 0.35;  // ボタンの幅を超えたら重くなる
+      if (x > 0) x *= 0.25;
+      st.x = x;
+      st.samples.push([e.clientX, e.timeStamp]);
+      if (st.samples.length > 5) st.samples.shift();
+      setRowOffset(st.row, x);
     } else if (st.mode === 'lifted' && Math.hypot(dx, dy) > 4) {
       startDrag(e.clientY);
     } else if (st.mode === 'drag') {
@@ -961,20 +986,38 @@ function gestures(list, o) {
     clearTimeout(st.timer);
     row.classList.remove('pressing', 'swiping');
     if (mode === 'pending') {
-      o.onTap(row);
+      if (st.isOpen) closeRow(row);
+      else o.onTap(row);
     } else if (mode === 'swipe') {
-      if (st.dx < -st.width / 3) { row.dataset.open = '1'; setRowOffset(row, -st.width); openRow = row; }
-      else closeRow(row);
+      finishSwipe();
     } else if (mode === 'lifted') {
       // 持ち上げただけで動かさなかった
       row.classList.remove('lifted');
       list.classList.remove('sorting');
     } else if (mode === 'drag') {
+      haptic(true);
       return endDrag();
     }
     st = null;
     flush();
   });
+
+  // 離したときの位置と指の速さで、開くか閉じるかを決める（はじけば少しの移動でも開閉する）
+  function finishSwipe() {
+    const { row, width, x = st.base, samples } = st;
+    const [a, b] = [samples[0], samples[samples.length - 1]];
+    const v = a && b && b[1] > a[1] ? (b[0] - a[0]) / (b[1] - a[1]) : 0; // px/ms、左がマイナス
+    const open = v < -0.35 ? true : v > 0.35 ? false : x < -width / 2;
+    // 速くはじいたほど短い時間で収める
+    const dist = Math.abs((open ? -width : 0) - x);
+    const dur = Math.round(Math.max(180, Math.min(380, Math.abs(v) > 0.35 ? dist / Math.abs(v) * 1.6 : 340)));
+    if (open) {
+      if (!st.isOpen) haptic(true);
+      openRowTo(row, width, dur);
+    } else {
+      closeRow(row, dur);
+    }
+  }
 
   list.addEventListener('pointercancel', reset);
 
@@ -1040,7 +1083,6 @@ function gestures(list, o) {
       else if (n > st.idx && c > st.centers[n] - lead) { shift = -st.step; target++; }
       r.style.transform = shift ? `translate3d(0, ${shift}px, 0)` : '';
     });
-    if (target !== st.target) haptic();
     st.target = target;
   }
 
